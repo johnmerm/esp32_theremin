@@ -32,8 +32,8 @@ GPIO 2  <------------ ECHO
 3.3V    ------------> VCC
 GND     ------------> GND
 
-ESP32-S2              Volume Sonar (HC-SR04)
----------             ---------------------
+ESP32-S2              Volume Sonar (HC-SR04) [optional]
+---------             --------------------------------
 GPIO 3  ------------> TRIG
 GPIO 4  <------------ ECHO
 3.3V    ------------> VCC
@@ -41,11 +41,19 @@ GND     ------------> GND
 
 ESP32-S2              Audio Output
 ---------             ------------
-GPIO 17 ------------> Amplifier IN (or direct to high-impedance headphones)
+GPIO 17 (DAC1) -----> Amplifier IN (or direct to high-impedance headphones)
 GND     ------------> Amplifier GND
+
+ESP32-S2              USB (MIDI out)
+---------             --------------
+GPIO 19 (D-)          USB D-  (directly via USB connector)
+GPIO 20 (D+)          USB D+  (directly via USB connector)
 ```
 
-**Note**: HC-SR04 sensors typically require 5V for VCC, but many work reliably at 3.3V. If you have issues, use a level shifter or 5V-tolerant GPIO pins.
+**Notes**:
+- HC-SR04 sensors typically require 5V for VCC, but many work reliably at 3.3V. If you have issues, use a level shifter or 5V-tolerant GPIO pins.
+- GPIO 19/20 are the ESP32-S2's native USB pins, directly wired to the USB connector on most dev boards.
+- The volume sonar is optional. To enable it, uncomment `#define VOLUME_SONAR_ENABLED` in `config.h`.
 
 ## Software Setup
 
@@ -77,15 +85,22 @@ GND     ------------> Amplifier GND
 Create a `platformio.ini` file:
 
 ```ini
-[env:esp32s2]
+[env:nodemcu-32s2]
 platform = espressif32
-board = esp32-s2-saola-1
+board = nodemcu-32s2
 framework = arduino
 build_flags =
-    -DARDUINO_USB_MODE=1
+    -DARDUINO_USB_MODE=0
     -DARDUINO_USB_CDC_ON_BOOT=1
+build_unflags =
+    -DARDUINO_USB_MODE=1
+upload_protocol = esptool
 monitor_speed = 115200
+lib_deps =
+    chegewara/ESP32TinyUSB@^2.0.2
 ```
+
+**Important**: `ARDUINO_USB_MODE` must be `0` (TinyUSB/USB-OTG) for MIDI to work. Mode `1` is Hardware CDC/JTAG only and does not support MIDI.
 
 ## Configuration
 
@@ -174,7 +189,7 @@ Connect the DAC output (GPIO17) to:
 ### Compilation errors
 - Ensure you have the latest ESP32 board package
 - Select the correct board (ESP32-S2 variant)
-- Check that USB.h and USBMIDI.h are available (included in ESP32 package)
+- For PlatformIO: ensure `ARDUINO_USB_MODE=0` and `chegewara/ESP32TinyUSB` is in `lib_deps`
 
 ## Technical Details
 

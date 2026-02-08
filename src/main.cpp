@@ -1,38 +1,51 @@
 /**
  * ESP32-S2 Theremin
  *
- * A digital theremin using two ultrasonic sonar sensors:
+ * A digital theremin using ultrasonic sonar sensors:
  * - One sensor controls pitch (frequency/MIDI note)
- * - One sensor controls volume (amplitude/MIDI velocity)
+ * - Optional second sensor controls volume (amplitude/MIDI velocity)
  *
  * Features:
  * - DAC audio output with configurable waveforms
  * - USB MIDI output for controlling external synthesizers
  * - Smooth sensor readings with configurable filtering
+ * - Optional volume sonar (enable VOLUME_SONAR_ENABLED in config.h)
+ * - Serial debug with "monitor" and "raw" output modes
  *
  * Hardware:
  * - ESP32-S2 development board
- * - Two HC-SR04 ultrasonic sensors
+ * - One or two HC-SR04 ultrasonic sensors
  * - Audio output via DAC (GPIO17)
  *
  * Author: ESP32 Theremin Project
  * License: MIT
  */
 
-#include <USB.h>
-#include <USBMIDI.h>
+#include <Arduino.h>
 #include "config.h"
+#if MIDI_ENABLED
+#include "midiusb.h"
+#endif
 
 // ============================================================================
 // Global Variables
 // ============================================================================
 
+#if MIDI_ENABLED
 // USB MIDI instance
-USBMIDI MIDI;
+MIDIusb MIDIout;
+
+// MIDI state
+int8_t lastMidiNote = -1;
+uint8_t lastMidiVelocity = 0;
+unsigned long lastMidiUpdate = 0;
+#endif
 
 // Sonar readings (smoothed)
 volatile float pitchDistance = MAX_DISTANCE_CM;
+#ifdef VOLUME_SONAR_ENABLED
 volatile float volumeDistance = MAX_DISTANCE_CM;
+#endif
 
 // Audio generation
 volatile float currentFrequency = MIN_FREQUENCY;
@@ -42,17 +55,48 @@ volatile float phaseAccumulator = 0.0f;
 // Waveform lookup table (256 entries for sine wave)
 static uint8_t sineTable[256];
 
-// MIDI state
-int8_t lastMidiNote = -1;
-uint8_t lastMidiVelocity = 0;
-unsigned long lastMidiUpdate = 0;
-
 // Timing
 unsigned long lastSonarRead = 0;
 unsigned long lastDebugPrint = 0;
 
 // Timer for audio generation
 hw_timer_t *audioTimer = NULL;
+
+// Debug output mode
+#if DEBUG_ENABLED
+enum DebugMode { MODE_MONITOR, MODE_RAW };
+DebugMode debugMode = MODE_MONITOR;
+String serialInputBuffer = "";
+#endif
+
+// ============================================================================
+// Note name utility (used for debug display)
+// ============================================================================
+
+static const char* NOTE_NAMES[] = {
+  "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+};
+
+/**
+ * Convert frequency to MIDI note number
+ */
+int8_t frequencyToNoteNumber(float frequency) {
+  if (frequency <= 0) return -1;
+  return (int8_t)(69.0f + 12.0f * log2(frequency / 440.0f));
+}
+
+/**
+ * Get note name string (e.g. "A4", "C#5") from MIDI note number
+ */
+void noteName(int8_t noteNum, char *buf, size_t bufLen) {
+  if (noteNum < 0 || noteNum > 127) {
+    snprintf(buf, bufLen, "---");
+    return;
+  }
+  int octave = (noteNum / 12) - 1;
+  int note = noteNum % 12;
+  snprintf(buf, bufLen, "%s%d", NOTE_NAMES[note], octave);
+}
 
 // ============================================================================
 // Waveform Generation
@@ -165,6 +209,7 @@ void readSonars() {
     pitchDistance = constrain(pitchDistance, MIN_DISTANCE_CM, MAX_DISTANCE_CM);
   }
 
+#ifdef VOLUME_SONAR_ENABLED
   // Small delay between sensor readings to avoid interference
   delayMicroseconds(500);
 
@@ -175,6 +220,7 @@ void readSonars() {
                      newVolumeDist * DISTANCE_SMOOTHING;
     volumeDistance = constrain(volumeDistance, MIN_DISTANCE_CM, MAX_DISTANCE_CM);
   }
+#endif
 }
 
 // ============================================================================
@@ -200,6 +246,7 @@ float distanceToFrequency(float distance) {
   return frequency;
 }
 
+#ifdef VOLUME_SONAR_ENABLED
 /**
  * Map volume distance to amplitude
  */
@@ -216,18 +263,25 @@ uint8_t distanceToVolume(float distance) {
 
   return volume;
 }
+#endif
 
 /**
  * Update audio parameters from sonar readings
  */
 void updateAudio() {
   currentFrequency = distanceToFrequency(pitchDistance);
+#ifdef VOLUME_SONAR_ENABLED
   currentVolume = distanceToVolume(volumeDistance);
+#else
+  currentVolume = FIXED_VOLUME;
+#endif
 }
 
 // ============================================================================
 // MIDI Functions
 // ============================================================================
+
+#if MIDI_ENABLED
 
 /**
  * Convert frequency to MIDI note number with pitch bend
@@ -249,6 +303,7 @@ void frequencyToMidi(float frequency, int8_t *note, int16_t *pitchBend) {
   *pitchBend = (int16_t)(fraction * 8192.0f / PITCH_BEND_RANGE);
 }
 
+#ifdef VOLUME_SONAR_ENABLED
 /**
  * Convert volume distance to MIDI velocity
  */
@@ -261,47 +316,47 @@ uint8_t distanceToVelocity(float distance) {
                                normalized * (MIDI_VELOCITY_MAX - MIDI_VELOCITY_MIN));
   return velocity;
 }
+#endif
 
 /**
  * Send MIDI note on message
  */
 void sendNoteOn(uint8_t note, uint8_t velocity) {
-  MIDI.noteOn(note, velocity, MIDI_CHANNEL);
+  MIDIout.noteON(note, velocity, MIDI_CHANNEL - 1);
 }
 
 /**
  * Send MIDI note off message
  */
 void sendNoteOff(uint8_t note) {
-  MIDI.noteOff(note, 0, MIDI_CHANNEL);
+  MIDIout.noteOFF(note, 0, MIDI_CHANNEL - 1);
 }
 
 /**
  * Send MIDI pitch bend message
  */
 void sendPitchBend(int16_t bend) {
-  // Convert to 14-bit unsigned (0-16383, center at 8192)
+  // pitchChange takes uint16_t (0-16383, center at 8192)
   uint16_t bendValue = (uint16_t)(bend + 8192);
-  MIDI.pitchBend(bendValue, MIDI_CHANNEL);
+  MIDIout.pitchChange(bendValue, MIDI_CHANNEL - 1);
 }
 
 /**
  * Send MIDI control change for volume (CC7)
  */
 void sendVolume(uint8_t volume) {
-  MIDI.controlChange(7, volume, MIDI_CHANNEL);
+  MIDIout.controlChange(7, volume, MIDI_CHANNEL - 1);
 }
 
 /**
  * Update MIDI output based on current readings
  */
 void updateMidi() {
-  if (!MIDI_ENABLED) return;
-
   int8_t note;
   int16_t pitchBend;
   frequencyToMidi(currentFrequency, &note, &pitchBend);
 
+#ifdef VOLUME_SONAR_ENABLED
   uint8_t velocity = distanceToVelocity(volumeDistance);
 
   // Check if we should turn off the note (hand far away = volume too low)
@@ -312,6 +367,9 @@ void updateMidi() {
     }
     return;
   }
+#else
+  uint8_t velocity = FIXED_MIDI_VELOCITY;
+#endif
 
   // Note changed - send note off for old, note on for new
   if (note != lastMidiNote) {
@@ -331,55 +389,146 @@ void updateMidi() {
   lastMidiVelocity = velocity;
 }
 
+#endif // MIDI_ENABLED
+
 // ============================================================================
-// Debug Functions
+// Debug / Serial Command Functions
 // ============================================================================
 
 #if DEBUG_ENABLED
-void printDebug() {
-  Serial.print("Pitch: ");
-  Serial.print(pitchDistance, 1);
-  Serial.print(" cm -> ");
-  Serial.print(currentFrequency, 1);
-  Serial.print(" Hz | Volume: ");
-  Serial.print(volumeDistance, 1);
-  Serial.print(" cm -> ");
-  Serial.print(currentVolume);
-  Serial.print(" | MIDI Note: ");
-  Serial.print(lastMidiNote);
-  Serial.print(" Vel: ");
-  Serial.println(lastMidiVelocity);
+
+// ANSI escape helpers
+#define ANSI_HOME       "\033[H"
+#define ANSI_CLEAR      "\033[2J"
+#define ANSI_CLEAR_LINE "\033[K"
+#define ANSI_GOTO(r,c)  "\033[" #r ";" #c "H"
+#define ANSI_BOLD       "\033[1m"
+#define ANSI_DIM        "\033[2m"
+#define ANSI_RESET      "\033[0m"
+
+void printHelp() {
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println(ANSI_BOLD "Commands:" ANSI_RESET);
+  DEBUG_SERIAL.println("  monitor  - ANSI dashboard (default)");
+  DEBUG_SERIAL.println("  raw      - CSV output for scripts");
+  DEBUG_SERIAL.println("  help     - show this help");
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println(ANSI_DIM "Raw format: D,<ms>,<dist_cm>,<freq_hz>,<volume>,<note_num>,<note_name>" ANSI_RESET);
+  DEBUG_SERIAL.println();
 }
+
+void printMonitorHeader() {
+  DEBUG_SERIAL.print(ANSI_CLEAR);
+  DEBUG_SERIAL.print(ANSI_HOME);
+  DEBUG_SERIAL.println(ANSI_BOLD "=== ESP32-S2 Theremin ===" ANSI_RESET);
+  DEBUG_SERIAL.println(ANSI_DIM "Send 'raw' for CSV, 'help' for commands" ANSI_RESET);
+}
+
+void printMonitor() {
+  int8_t note = frequencyToNoteNumber(currentFrequency);
+  char name[8];
+  noteName(note, name, sizeof(name));
+
+  DEBUG_SERIAL.print(ANSI_GOTO(4,1));
+  DEBUG_SERIAL.printf("Distance:  %7.1f cm" ANSI_CLEAR_LINE "\n", pitchDistance);
+  DEBUG_SERIAL.printf("Frequency: %7.1f Hz" ANSI_CLEAR_LINE "\n", currentFrequency);
+  DEBUG_SERIAL.printf("Note:      %4s (MIDI %d)" ANSI_CLEAR_LINE "\n", name, note);
+#ifdef VOLUME_SONAR_ENABLED
+  DEBUG_SERIAL.printf("Vol dist:  %7.1f cm" ANSI_CLEAR_LINE "\n", volumeDistance);
 #endif
+  DEBUG_SERIAL.printf("Volume:    %7d/255" ANSI_CLEAR_LINE "\n", currentVolume);
+#if MIDI_ENABLED
+  DEBUG_SERIAL.printf("MIDI sent: %4s  vel=%d" ANSI_CLEAR_LINE "\n", name, lastMidiVelocity);
+#endif
+  DEBUG_SERIAL.printf("Uptime:    %7lu s" ANSI_CLEAR_LINE "\n", millis() / 1000);
+}
+
+void printRaw() {
+  int8_t note = frequencyToNoteNumber(currentFrequency);
+  char name[8];
+  noteName(note, name, sizeof(name));
+
+  // CSV: D,timestamp_ms,distance_cm,frequency_hz,volume,note_number,note_name
+  DEBUG_SERIAL.printf("D,%lu,%.1f,%.1f,%d,%d,%s\n",
+    millis(),
+    pitchDistance,
+    currentFrequency,
+    currentVolume,
+    note,
+    name);
+}
+
+void processSerialCommand(const String &cmd) {
+  String trimmed = cmd;
+  trimmed.trim();
+  trimmed.toLowerCase();
+
+  if (trimmed == "raw") {
+    debugMode = MODE_RAW;
+    DEBUG_SERIAL.println("OK:raw");
+  } else if (trimmed == "monitor") {
+    debugMode = MODE_MONITOR;
+    printMonitorHeader();
+  } else if (trimmed == "help") {
+    printHelp();
+  } else if (trimmed.length() > 0) {
+    DEBUG_SERIAL.printf("ERR:unknown command '%s'\n", trimmed.c_str());
+  }
+}
+
+void handleSerialInput() {
+  while (DEBUG_SERIAL.available()) {
+    char c = DEBUG_SERIAL.read();
+    if (c == '\n' || c == '\r') {
+      if (serialInputBuffer.length() > 0) {
+        processSerialCommand(serialInputBuffer);
+        serialInputBuffer = "";
+      }
+    } else {
+      serialInputBuffer += c;
+    }
+  }
+}
+
+void printDebug() {
+  if (debugMode == MODE_RAW) {
+    printRaw();
+  } else {
+    printMonitor();
+  }
+}
+
+#endif // DEBUG_ENABLED
 
 // ============================================================================
 // Setup and Loop
 // ============================================================================
 
 void setup() {
-  // Initialize serial for debugging
-  #if DEBUG_ENABLED
-  Serial.begin(115200);
-  while (!Serial) delay(10);
-  Serial.println("ESP32-S2 Theremin Starting...");
-  #endif
-
-  // Initialize USB and MIDI
-  USB.begin();
-  MIDI.begin();
-
-  #if DEBUG_ENABLED
-  Serial.println("USB MIDI initialized");
-  #endif
-
-  // Initialize sonar pins
+  // Initialize sonar pins first (before anything that might block)
   pinMode(PITCH_TRIGGER_PIN, OUTPUT);
+  digitalWrite(PITCH_TRIGGER_PIN, LOW);
   pinMode(PITCH_ECHO_PIN, INPUT);
+#ifdef VOLUME_SONAR_ENABLED
   pinMode(VOLUME_TRIGGER_PIN, OUTPUT);
+  digitalWrite(VOLUME_TRIGGER_PIN, LOW);
   pinMode(VOLUME_ECHO_PIN, INPUT);
+#endif
 
   // Initialize DAC
   pinMode(DAC_OUTPUT_PIN, OUTPUT);
+
+  // Initialize serial for debugging
+  #if DEBUG_ENABLED
+  DEBUG_SERIAL.begin(115200);
+  unsigned long serialWait = millis();
+  while (!DEBUG_SERIAL && millis() - serialWait < 3000) delay(10);
+  #endif
+
+#if MIDI_ENABLED
+  // Initialize USB MIDI
+  MIDIout.begin();
+#endif
 
   // Initialize sine lookup table
   initSineTable();
@@ -393,10 +542,7 @@ void setup() {
   timerAlarmEnable(audioTimer);
 
   #if DEBUG_ENABLED
-  Serial.println("Audio timer started at ");
-  Serial.print(AUDIO_SAMPLE_RATE);
-  Serial.println(" Hz");
-  Serial.println("Theremin ready!");
+  printMonitorHeader();
   #endif
 }
 
@@ -410,14 +556,37 @@ void loop() {
     updateAudio();
   }
 
+#if MIDI_ENABLED
+  // MIDI test: send a note on/off every second to verify USB MIDI works
+  static unsigned long lastMidiTest = 0;
+  static bool testNoteOn = false;
+  if (currentTime - lastMidiTest >= 1000) {
+    lastMidiTest = currentTime;
+    if (testNoteOn) {
+      MIDIout.noteOFF(60, 0, 0);  // C4 off
+      #if DEBUG_ENABLED
+      DEBUG_SERIAL.println("MIDI TEST: note OFF 60");
+      #endif
+    } else {
+      MIDIout.noteON(60, 127, 0);  // C4 on, full velocity
+      #if DEBUG_ENABLED
+      DEBUG_SERIAL.println("MIDI TEST: note ON 60");
+      #endif
+    }
+    testNoteOn = !testNoteOn;
+  }
+
   // Update MIDI at configured interval
-  if (MIDI_ENABLED && currentTime - lastMidiUpdate >= MIDI_UPDATE_MS) {
+  if (currentTime - lastMidiUpdate >= MIDI_UPDATE_MS) {
     lastMidiUpdate = currentTime;
     updateMidi();
   }
+#endif
 
-  // Debug output
+  // Handle serial commands and debug output
   #if DEBUG_ENABLED
+  handleSerialInput();
+
   if (currentTime - lastDebugPrint >= DEBUG_INTERVAL_MS) {
     lastDebugPrint = currentTime;
     printDebug();

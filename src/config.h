@@ -12,12 +12,17 @@
 // ============================================================================
 
 // Pitch sonar (controls frequency/note)
-#define PITCH_TRIGGER_PIN   1
-#define PITCH_ECHO_PIN      2
+#define PITCH_TRIGGER_PIN   2 // Also blinks the led
+#define PITCH_ECHO_PIN      3
 
 // Volume sonar (controls amplitude/velocity)
-#define VOLUME_TRIGGER_PIN  3
-#define VOLUME_ECHO_PIN     4
+// Uncomment the line below to enable the second sonar for volume control
+// #define VOLUME_SONAR_ENABLED
+
+#ifdef VOLUME_SONAR_ENABLED
+#define VOLUME_TRIGGER_PIN  4
+#define VOLUME_ECHO_PIN     5
+#endif
 
 // DAC output (ESP32-S2 has DAC on GPIO17 and GPIO18)
 #define DAC_OUTPUT_PIN      17
@@ -52,6 +57,11 @@
 #define MIN_VOLUME          0
 #define MAX_VOLUME          255
 
+// Fixed volume when volume sonar is disabled (0-255)
+#ifndef VOLUME_SONAR_ENABLED
+#define FIXED_VOLUME        200
+#endif
+
 // Waveform type: 0=Sine, 1=Triangle, 2=Sawtooth, 3=Square
 #define WAVEFORM_TYPE       0
 
@@ -79,6 +89,11 @@
 #define MIDI_VELOCITY_MIN   0
 #define MIDI_VELOCITY_MAX   127
 
+// Fixed MIDI velocity when volume sonar is disabled
+#ifndef VOLUME_SONAR_ENABLED
+#define FIXED_MIDI_VELOCITY 100
+#endif
+
 // Note-off threshold (velocity below this turns note off)
 #define NOTE_OFF_THRESHOLD  5
 
@@ -87,7 +102,12 @@
 // ============================================================================
 
 // Enable serial debug output (disable for production)
-#define DEBUG_ENABLED       false
+#define DEBUG_ENABLED       true
+
+// Debug serial port
+// Serial  = USB CDC (native USB, GPIO 19/20)
+// Serial0 = UART0 (routed to USB-UART chip on most dev boards)
+#define DEBUG_SERIAL        Serial0
 
 // Debug print interval (ms)
 #define DEBUG_INTERVAL_MS   100
